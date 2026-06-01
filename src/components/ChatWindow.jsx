@@ -42,9 +42,6 @@ export default function ChatWindow() {
     typeof navigator !== "undefined" ? navigator.onLine : true
   );
   const messagesEndRef = useRef(null);
-  const lastVoiceTranscriptRef = useRef("");
-  const lastVoiceSentAtRef = useRef(0);
-  const isSendingVoiceRef = useRef(false);
 
   useEffect(() => {
     return () => stopSpeaking();
@@ -156,7 +153,7 @@ export default function ChatWindow() {
       const { reply } = await postChat(text);
       const melloMessage = createMessage("mello", reply);
       appendMessage(melloMessage);
-      playReply(reply);
+      await playReply(reply);
       evaluateMemoryCandidate(text);
     } catch (err) {
       const debugText =
@@ -176,23 +173,8 @@ export default function ChatWindow() {
 
   const handleVoiceTranscript = (transcript) => {
     const text = transcript.trim();
-    if (!text) return;
-
-    const now = Date.now();
-    if (
-      text === lastVoiceTranscriptRef.current &&
-      now - lastVoiceSentAtRef.current < 2000
-    ) {
-      return;
-    }
-    if (isSendingVoiceRef.current) return;
-
-    isSendingVoiceRef.current = true;
-    lastVoiceTranscriptRef.current = text;
-    lastVoiceSentAtRef.current = now;
-    sendMessage(text).finally(() => {
-      isSendingVoiceRef.current = false;
-    });
+    if (!text || loading) return;
+    sendMessage(text);
   };
 
   const handleSaveMemory = async () => {

@@ -7,7 +7,7 @@ const IOS_SAFARI_VOICE_MSG =
 const PERMISSION_DENIED_MSG =
   "Mikrofon není povolený. Povolte prosím mikrofon v nastavení prohlížeči, nebo napište zprávu ručně.";
 
-const VOICE_DEDUP_MS = 2000;
+const VOICE_SEND_DEDUP_MS = 2000;
 const RESTART_AFTER_EMPTY_SILENCE_MS = 500;
 const RESTART_AFTER_RESPONSE_MS = 700;
 const NEAR_SEND_LEAD_MS = 1200;
@@ -48,7 +48,6 @@ function endsWithSentencePunctuation(text: string): boolean {
   return /[.!?…]$/.test(text.trim());
 }
 
-/** Dynamická doba ticha před odesláním podle délky věty. */
 export function getSilenceDelay(transcript: string): number {
   const trimmed = transcript.trim();
   if (!trimmed) return 3000;
@@ -97,7 +96,7 @@ export default function VoiceInput({
   const [previewTranscript, setPreviewTranscript] = useState("");
   const [nearSend, setNearSend] = useState(false);
   const [userStoppedVoiceMode, setUserStoppedVoiceMode] = useState(false);
-  const [showContinueHint, setShowContinueHint] = useState(false);
+  const [needsManualContinue, setNeedsManualContinue] = useState(false);
   const [statusError, setStatusError] = useState<string | null>(null);
 
   const recognitionRef = useRef<SpeechRecognition | null>(null);
@@ -109,12 +108,12 @@ export default function VoiceInput({
   const silenceDueAtRef = useRef(0);
   const silenceFiredRef = useRef(false);
   const hasTranscriptRef = useRef(false);
-  const lastVoiceTranscriptRef = useRef("");
-  const lastVoiceSentAtRef = useRef(0);
-  const isSendingVoiceRef = useRef(false);
+  const lastSentTranscriptRef = useRef("");
+  const lastSentAtRef = useRef(0);
   const isStartingRef = useRef(false);
-  const prevVoiceModeRef = useRef(false);
+  const prevSpeakingRef = useRef(false);
   const prevThinkingRef = useRef(false);
+  const prevVoiceModeRef = useRef(false);
 
   const voiceModeRef = useRef(voiceModeEnabled);
   const thinkingRef = useRef(isThinking);
@@ -128,6 +127,25 @@ export default function VoiceInput({
 
   const supported = isSpeechRecognitionSupported();
   const voiceUnsupportedMessage = getVoiceUnsupportedMessage();
+  const isProcessing = isThinking || isSpeaking;
+
+  const logVoiceState = useCallback(
+    (label: string, extra?: Record<string, unknown>) => {
+      console.log("VOICE state", {
+        label,
+        isListening,
+        isSpeaking,
+        isThinking,
+        isProcessing,
+        voiceModeEnabled,
+        needsManualContinue,
+        statusError,
+        silenceFired: silenceFiredRef.current,
+        ...extra,
+      });
+    },
+    [isListening, isSpeaking, isThinking, isProcessing, voiceModeEnabled, needsManualContinue, statusError]
+  );
 
   const clearTranscriptRefs = useCallback(() => {
     latestTranscriptRef.current = "";
@@ -159,16 +177,29 @@ export default function VoiceInput({
     }
   }, []);
 
-  const updateLatestTranscript = useCallback((text: string) => {
-    const trimmed = text.trim();
-    latestTranscriptRef.current = trimmed;
-    hasTranscriptRef.current = trimmed.length > 0;
-    setHasDetectedText(trimmed.length > 0);
-    setPreviewTranscript(trimmed);
-    if (trimmed) {
-      onInterimTranscript?.(trimmed);
-    }
-  }, [onInterimTranscript]);
+  const canListenNow = useCallback(() => {
+    return (
+      voiceModeRef.current &&
+      !disabledRef.current &&
+      !thinkingRef.current &&
+      !speakingRef.current &&
+      supported
+    );
+  }, [supported]);
+
+  const updateLatestTranscript = useCallback(
+    (text: string) => {
+      const trimmed = text.trim();
+      latestTranscriptRef.current = trimmed;
+      hasTranscriptRef.current = trimmed.length > 0;
+      setHasDetectedText(trimmed.length > 0);
+      setPreviewTranscript(trimmed);
+      if (trimmed) {
+        onInterimTranscript?.(trimmed);
+      }
+    },
+    [onInterimTranscript]
+  );
 
   const sendFinalTranscript = useCallback(
     (raw: string) => {
@@ -177,26 +208,22 @@ export default function VoiceInput({
 
       const now = Date.now();
       if (
-        text === lastVoiceTranscriptRef.current &&
-        now - lastVoiceSentAtRef.current < VOICE_DEDUP_MS
+        text === lastSentTranscriptRef.current &&
+        now - lastSentAtRef.current < VOICE_SEND_DEDUP_MS
       ) {
+        logVoiceState("sendFinalTranscript deduped", { text });
         return false;
       }
-      if (isSendingVoiceRef.current) return false;
 
-      isSendingVoiceRef.current = true;
-      lastVoiceTranscriptRef.current = text;
-      lastVoiceSentAtRef.current = now;
+      lastSentTranscriptRef.current = text;
+      lastSentAtRef.current = now;
+      silenceFiredRef.current = false;
       onInterimTranscript?.("");
+      logVoiceState("sendFinalTranscript", { text });
       onTranscript(text);
-
-      window.setTimeout(() => {
-        isSendingVoiceRef.current = false;
-      }, VOICE_DEDUP_MS);
-
       return true;
     },
-    [onTranscript, onInterimTranscript]
+    [onTranscript, onInterimTranscript, logVoiceState]
   );
 
   const stopRecognitionEngine = useCallback(() => {
@@ -253,13 +280,13 @@ export default function VoiceInput({
     setNearSend(false);
 
     const text = latestTranscriptRef.current.trim();
+    logVoiceState("silence timeout", { text });
 
     if (text) {
       if (recognitionRef.current) {
         stopRecognitionEngine();
       }
       clearTranscriptRefs();
-      setShowContinueHint(false);
       sendFinalTranscript(text);
       return;
     }
@@ -267,7 +294,7 @@ export default function VoiceInput({
     if (recognitionRef.current) {
       stopRecognitionEngine();
     }
-  }, [clearTranscriptRefs, stopRecognitionEngine, sendFinalTranscript]);
+  }, [clearTranscriptRefs, stopRecognitionEngine, sendFinalTranscript, logVoiceState]);
 
   const resetSilenceTimer = useCallback(
     (transcript: string) => {
@@ -292,112 +319,24 @@ export default function VoiceInput({
     [clearSilenceTimer, handleSilenceTimeout]
   );
 
-  const requestListeningRestart = useCallback(
-    (delayMs: number, options?: { preserveTranscript?: boolean }) => {
-      clearRestartTimer();
-
-      if (
-        !voiceModeRef.current ||
-        disabledRef.current ||
-        thinkingRef.current ||
-        speakingRef.current ||
-        recognitionRef.current ||
-        isStartingRef.current ||
-        isSendingVoiceRef.current
-      ) {
-        return;
-      }
-
-      if (!options?.preserveTranscript && hasTranscriptRef.current) {
-        return;
-      }
-
-      restartTimerRef.current = setTimeout(() => {
-        restartTimerRef.current = null;
-        if (
-          !voiceModeRef.current ||
-          disabledRef.current ||
-          thinkingRef.current ||
-          speakingRef.current ||
-          recognitionRef.current ||
-          isStartingRef.current ||
-          isSendingVoiceRef.current
-        ) {
-          return;
-        }
-        startListeningRef.current(options?.preserveTranscript ?? false);
-      }, delayMs);
-    },
-    [clearRestartTimer]
-  );
-
-  const handleRecognitionEnd = useCallback(() => {
-    setIsListening(false);
-    recognitionRef.current = null;
-    isStartingRef.current = false;
-
-    if (isSendingVoiceRef.current || silenceFiredRef.current) {
-      if (!isSendingVoiceRef.current) {
-        clearTranscriptRefs();
-      }
-      return;
-    }
-
-    const text = latestTranscriptRef.current.trim();
-    const waitingForSilence =
-      hasTranscriptRef.current && Date.now() < silenceDueAtRef.current;
-
-    if (waitingForSilence && text) {
-      requestListeningRestart(0, { preserveTranscript: true });
-      return;
-    }
-
-    if (hasTranscriptRef.current && text) {
-      clearTranscriptRefs();
-      sendFinalTranscript(text);
-      return;
-    }
-
-    clearTranscriptRefs();
-
-    if (
-      voiceModeRef.current &&
-      !disabledRef.current &&
-      !thinkingRef.current &&
-      !speakingRef.current &&
-      !isSendingVoiceRef.current
-    ) {
-      requestListeningRestart(RESTART_AFTER_EMPTY_SILENCE_MS);
-    }
-  }, [
-    clearTranscriptRefs,
-    sendFinalTranscript,
-    requestListeningRestart,
-  ]);
-
-  const startListeningRef = useRef<(preserveTranscript?: boolean) => void>(
-    () => {}
-  );
+  const startListeningRef = useRef<(preserveTranscript?: boolean) => void>(() => {});
 
   startListeningRef.current = (preserveTranscript = false) => {
-    if (
-      !voiceModeRef.current ||
-      disabledRef.current ||
-      thinkingRef.current ||
-      speakingRef.current ||
-      !supported ||
-      isSendingVoiceRef.current
-    ) {
-      return;
+    if (!canListenNow()) {
+      logVoiceState("startListening blocked", {
+        thinking: thinkingRef.current,
+        speaking: speakingRef.current,
+      });
+      return false;
     }
 
     if (recognitionRef.current || isStartingRef.current) {
-      return;
+      return true;
     }
 
     isStartingRef.current = true;
     setStatusError(null);
-    setShowContinueHint(false);
+    setNeedsManualContinue(false);
 
     if (!preserveTranscript) {
       clearTranscriptRefs();
@@ -406,7 +345,8 @@ export default function VoiceInput({
     const recognition = getSpeechRecognition();
     if (!recognition) {
       isStartingRef.current = false;
-      return;
+      setNeedsManualContinue(true);
+      return false;
     }
 
     recognition.lang = "cs-CZ";
@@ -444,19 +384,15 @@ export default function VoiceInput({
     };
 
     recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
+      console.log("recognition error", event.error);
       clearSilenceTimer();
       isStartingRef.current = false;
       setIsListening(false);
       recognitionRef.current = null;
 
-      if (event.error === "no-speech") {
-        if (
-          voiceModeRef.current &&
-          !thinkingRef.current &&
-          !speakingRef.current &&
-          !hasTranscriptRef.current
-        ) {
-          requestListeningRestart(RESTART_AFTER_EMPTY_SILENCE_MS);
+      if (event.error === "no-speech" || event.error === "aborted") {
+        if (canListenNow()) {
+          scheduleListeningRestartRef.current(RESTART_AFTER_EMPTY_SILENCE_MS);
         }
         return;
       }
@@ -464,11 +400,20 @@ export default function VoiceInput({
       if (event.error === "not-allowed" || event.error === "service-not-allowed") {
         setStatusError(PERMISSION_DENIED_MSG);
         onVoiceModeChange(false);
+        return;
+      }
+
+      if (canListenNow()) {
+        setNeedsManualContinue(true);
+        logVoiceState("recognition error needs manual continue", {
+          error: event.error,
+        });
       }
     };
 
     recognition.onend = () => {
-      handleRecognitionEnd();
+      console.log("recognition onend");
+      handleRecognitionEndRef.current();
     };
 
     recognitionRef.current = recognition;
@@ -476,6 +421,7 @@ export default function VoiceInput({
       recognition.start();
       setIsListening(true);
       isStartingRef.current = false;
+      logVoiceState("recognition started");
 
       const existing = latestTranscriptRef.current.trim();
       const silenceStillPending =
@@ -488,53 +434,133 @@ export default function VoiceInput({
       } else if (!existing && !silenceStillPending) {
         resetSilenceTimer("");
       }
-    } catch {
+      return true;
+    } catch (err) {
+      console.log("recognition start failed", err);
       setIsListening(false);
       recognitionRef.current = null;
       isStartingRef.current = false;
       clearSilenceTimer();
+      setNeedsManualContinue(true);
+      logVoiceState("recognition start failed");
+      return false;
     }
   };
+
+  const scheduleListeningRestartRef = useRef<(delayMs: number) => void>(() => {});
+
+  scheduleListeningRestartRef.current = (delayMs: number) => {
+    clearRestartTimer();
+
+    if (!canListenNow()) {
+      return;
+    }
+
+    restartTimerRef.current = setTimeout(() => {
+      restartTimerRef.current = null;
+      if (!canListenNow()) return;
+
+      silenceFiredRef.current = false;
+      const started = startListeningRef.current(false);
+      if (!started) {
+        setNeedsManualContinue(true);
+        logVoiceState("auto restart failed, manual continue");
+      } else {
+        logVoiceState("auto restart success");
+      }
+    }, delayMs);
+  };
+
+  const handleRecognitionEndRef = useRef<() => void>(() => {});
+
+  handleRecognitionEndRef.current = () => {
+    console.log("recognition onend handler");
+    setIsListening(false);
+    recognitionRef.current = null;
+    isStartingRef.current = false;
+
+    if (silenceFiredRef.current) {
+      silenceFiredRef.current = false;
+      logVoiceState("onend after silence send");
+      if (canListenNow()) {
+        scheduleListeningRestartRef.current(RESTART_AFTER_EMPTY_SILENCE_MS);
+      }
+      return;
+    }
+
+    const text = latestTranscriptRef.current.trim();
+    const waitingForSilence =
+      hasTranscriptRef.current && Date.now() < silenceDueAtRef.current;
+
+    if (waitingForSilence && text) {
+      logVoiceState("onend preserve transcript, restart recognition");
+      const started = startListeningRef.current(true);
+      if (!started) {
+        scheduleListeningRestartRef.current(0);
+      }
+      return;
+    }
+
+    if (hasTranscriptRef.current && text) {
+      clearTranscriptRefs();
+      sendFinalTranscript(text);
+      return;
+    }
+
+    clearTranscriptRefs();
+
+    if (canListenNow()) {
+      scheduleListeningRestartRef.current(RESTART_AFTER_EMPTY_SILENCE_MS);
+    }
+  };
+
+  useEffect(() => {
+    if (!voiceModeEnabled || disabled || isProcessing) {
+      stopListening({ discardTranscript: false });
+      return;
+    }
+  }, [voiceModeEnabled, disabled, isProcessing, stopListening]);
+
+  useEffect(() => {
+    if (!voiceModeEnabled || disabled || !supported) return;
+
+    const wasSpeaking = prevSpeakingRef.current;
+    const wasThinking = prevThinkingRef.current;
+    prevSpeakingRef.current = isSpeaking;
+    prevThinkingRef.current = isThinking;
+
+    const finishedSpeaking = wasSpeaking && !isSpeaking;
+    const finishedThinking = wasThinking && !isThinking;
+
+    if (finishedSpeaking && !isThinking) {
+      console.log("speech synthesis ended, restarting recognition");
+      silenceFiredRef.current = false;
+      scheduleListeningRestartRef.current(RESTART_AFTER_RESPONSE_MS);
+      return;
+    }
+
+    if (finishedThinking && !isSpeaking && !readAloudEnabled) {
+      scheduleListeningRestartRef.current(RESTART_AFTER_RESPONSE_MS);
+    }
+  }, [
+    isSpeaking,
+    isThinking,
+    voiceModeEnabled,
+    disabled,
+    supported,
+    readAloudEnabled,
+    stopListening,
+  ]);
 
   useEffect(() => {
     const justEnabled = voiceModeEnabled && !prevVoiceModeRef.current;
     prevVoiceModeRef.current = voiceModeEnabled;
 
-    if (!voiceModeEnabled || disabled || isThinking || isSpeaking) {
-      stopListening({ discardTranscript: true });
-      return;
+    if (justEnabled && !disabled && supported && !isProcessing) {
+      logVoiceState("voice mode enabled, initial listen");
+      scheduleListeningRestartRef.current(0);
     }
-
-    if (!supported) return;
-
-    requestListeningRestart(justEnabled ? 0 : RESTART_AFTER_RESPONSE_MS);
-
-    return () => {
-      clearRestartTimer();
-    };
-  }, [
-    voiceModeEnabled,
-    disabled,
-    isThinking,
-    isSpeaking,
-    supported,
-    stopListening,
-    requestListeningRestart,
-    clearRestartTimer,
-  ]);
-
-  useEffect(() => {
-    const finishedThinking =
-      prevThinkingRef.current && !isThinking && voiceModeEnabled;
-    prevThinkingRef.current = isThinking;
-
-    if (finishedThinking && !isSpeaking && !readAloudEnabled) {
-      setShowContinueHint(true);
-    }
-    if (isThinking || isSpeaking) {
-      setShowContinueHint(false);
-    }
-  }, [isThinking, isSpeaking, voiceModeEnabled, readAloudEnabled]);
+  }, [voiceModeEnabled, disabled, supported, isProcessing, logVoiceState]);
 
   useEffect(() => {
     return () => {
@@ -551,7 +577,7 @@ export default function VoiceInput({
     }
     setStatusError(null);
     setUserStoppedVoiceMode(false);
-    setShowContinueHint(false);
+    setNeedsManualContinue(false);
     clearTranscriptRefs();
     onVoiceModeChange(true);
   };
@@ -560,14 +586,25 @@ export default function VoiceInput({
     clearSilenceTimer();
     clearRestartTimer();
     clearTranscriptRefs();
-    isSendingVoiceRef.current = false;
     isStartingRef.current = false;
     onInterimTranscript?.("");
     stopListening({ discardTranscript: true });
-    setShowContinueHint(false);
+    setNeedsManualContinue(false);
     setUserStoppedVoiceMode(true);
     onVoiceModeChange(false);
     setStatusError(null);
+    logVoiceState("user ended conversation");
+  };
+
+  const handleManualContinue = () => {
+    setNeedsManualContinue(false);
+    setStatusError(null);
+    silenceFiredRef.current = false;
+    logVoiceState("manual continue");
+    const started = startListeningRef.current(false);
+    if (!started) {
+      scheduleListeningRestartRef.current(0);
+    }
   };
 
   const wordCount = countWords(previewTranscript);
@@ -580,13 +617,13 @@ export default function VoiceInput({
     if (!voiceModeEnabled) return null;
     if (isSpeaking) return "Mello mluví…";
     if (isThinking) return "Mello přemýšlí…";
+    if (needsManualContinue) return "Klepněte na tlačítko a pokračujte v mluvení.";
     if (isListening && hasDetectedText) {
       if (nearSend) return "Rozumím, ještě chvíli počkám…";
       if (wordCount <= 3) return "Poslouchám, můžete pokračovat…";
       return "Mello poslouchá…";
     }
     if (isListening) return "Mello poslouchá…";
-    if (showContinueHint) return "Můžete pokračovat v rozhovoru.";
     return "Čekám, až promluvíte…";
   })();
 
@@ -623,6 +660,16 @@ export default function VoiceInput({
           aria-label="Ukončit hlasový rozhovor"
         >
           Ukončit rozhovor
+        </button>
+      )}
+
+      {needsManualContinue && voiceModeEnabled && (
+        <button
+          type="button"
+          onClick={handleManualContinue}
+          className="w-full max-w-md min-h-[72px] px-8 py-5 rounded-2xl text-xl font-bold text-white bg-emerald-600 hover:bg-emerald-700 shadow-lg transition border-2 border-emerald-800"
+        >
+          Pokračovat v mluvení
         </button>
       )}
 
