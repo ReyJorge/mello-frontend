@@ -38,6 +38,7 @@ export default function ChatWindow() {
   const [userId, setUserId] = useState(null);
   const [hydrated, setHydrated] = useState(false);
   const [bannerError, setBannerError] = useState(null);
+  const [memoryBusy, setMemoryBusy] = useState(false);
   const [isOnline, setIsOnline] = useState(
     typeof navigator !== "undefined" ? navigator.onLine : true
   );
@@ -46,6 +47,13 @@ export default function ChatWindow() {
   useEffect(() => {
     return () => stopSpeaking();
   }, []);
+
+  useEffect(() => {
+    if (!voiceModeEnabled) {
+      stopSpeaking();
+      setSpeaking(false);
+    }
+  }, [voiceModeEnabled]);
 
   useEffect(() => {
     const onOnline = () => setIsOnline(true);
@@ -104,10 +112,15 @@ export default function ChatWindow() {
     if (!voiceEnabled || !text) return;
     setTtsNotice(null);
     setLastReply(text);
+    console.log("SPEECH synthesis start");
     await readAloud(text, {
       onStart: () => setSpeaking(true),
-      onEnd: () => setSpeaking(false),
+      onEnd: () => {
+        console.log("SPEECH synthesis end");
+        setSpeaking(false);
+      },
       onBlocked: () => {
+        console.log("SPEECH synthesis blocked");
         setTtsNotice(TTS_BLOCKED_MSG);
         setSpeaking(false);
       },
@@ -180,6 +193,9 @@ export default function ChatWindow() {
   const handleSaveMemory = async () => {
     if (!pendingMemoryCandidate) return;
 
+    console.log("MEMORY save start");
+    setMemoryBusy(true);
+
     if (!userId) {
       appendMessage(
         createMessage(
@@ -189,6 +205,8 @@ export default function ChatWindow() {
       );
       setPendingMemoryCandidate(null);
       setShowMemoryPrompt(false);
+      setMemoryBusy(false);
+      console.log("MEMORY save end");
       return;
     }
 
@@ -208,6 +226,8 @@ export default function ChatWindow() {
     appendMessage(createMessage("mello", text));
     setPendingMemoryCandidate(null);
     setShowMemoryPrompt(false);
+    setMemoryBusy(false);
+    console.log("MEMORY save end");
   };
 
   const handleDismissMemory = () => {
@@ -368,8 +388,8 @@ export default function ChatWindow() {
           onVoiceModeChange={setVoiceModeEnabled}
           isThinking={loading}
           isSpeaking={speaking}
+          isMemoryBusy={memoryBusy}
           disabled={!isOnline}
-          readAloudEnabled={voiceEnabled}
           onTranscript={handleVoiceTranscript}
           onInterimTranscript={handleVoiceInterim}
         />

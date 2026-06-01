@@ -8,21 +8,20 @@ const PERMISSION_DENIED_MSG =
   "Mikrofon není povolený. Povolte prosím mikrofon v nastavení prohlížeči, nebo napište zprávu ručně.";
 
 const VOICE_SEND_DEDUP_MS = 2000;
-const RESTART_AFTER_EMPTY_SILENCE_MS = 500;
-const RESTART_AFTER_RESPONSE_MS = 700;
-const NEAR_SEND_LEAD_MS = 1200;
+const RESTART_DELAY_MS = 700;
+const RESTART_AFTER_ERROR_MS = 500;
 
-function getSpeechRecognition(): SpeechRecognition | null {
-  const Ctor =
+function getSpeechRecognitionCtor(): SpeechRecognitionConstructor | null {
+  return (
     window.SpeechRecognition ||
     (window as Window & { webkitSpeechRecognition?: SpeechRecognitionConstructor })
-      .webkitSpeechRecognition;
-  if (!Ctor) return null;
-  return new Ctor();
+      .webkitSpeechRecognition ||
+    null
+  );
 }
 
 export function isSpeechRecognitionSupported(): boolean {
-  return getSpeechRecognition() !== null;
+  return getSpeechRecognitionCtor() !== null;
 }
 
 function isIOSSafari(): boolean {
@@ -75,8 +74,8 @@ type VoiceInputProps = {
   onVoiceModeChange: (enabled: boolean) => void;
   isThinking: boolean;
   isSpeaking: boolean;
+  isMemoryBusy?: boolean;
   disabled?: boolean;
-  readAloudEnabled?: boolean;
   onTranscript: (text: string) => void;
   onInterimTranscript?: (text: string) => void;
 };
@@ -86,18 +85,19 @@ export default function VoiceInput({
   onVoiceModeChange,
   isThinking,
   isSpeaking,
+  isMemoryBusy = false,
   disabled = false,
-  readAloudEnabled = true,
   onTranscript,
   onInterimTranscript,
 }: VoiceInputProps) {
-  const [isListening, setIsListening] = useState(false);
   const [hasDetectedText, setHasDetectedText] = useState(false);
   const [previewTranscript, setPreviewTranscript] = useState("");
   const [nearSend, setNearSend] = useState(false);
   const [userStoppedVoiceMode, setUserStoppedVoiceMode] = useState(false);
   const [needsManualContinue, setNeedsManualContinue] = useState(false);
   const [statusError, setStatusError] = useState<string | null>(null);
+  const [recognitionRunning, setRecognitionRunning] = useState(false);
+  const [lastVoiceError, setLastVoiceError] = useState<string | null>(null);
 
   const recognitionRef = useRef<SpeechRecognition | null>(null);
   const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -111,40 +111,44 @@ export default function VoiceInput({
   const lastSentTranscriptRef = useRef("");
   const lastSentAtRef = useRef(0);
   const isStartingRef = useRef(false);
-  const prevSpeakingRef = useRef(false);
-  const prevThinkingRef = useRef(false);
+  const prevProcessingRef = useRef(false);
   const prevVoiceModeRef = useRef(false);
 
-  const voiceModeRef = useRef(voiceModeEnabled);
+  const conversationActiveRef = useRef(false);
   const thinkingRef = useRef(isThinking);
   const speakingRef = useRef(isSpeaking);
+  const memoryBusyRef = useRef(isMemoryBusy);
   const disabledRef = useRef(disabled);
 
-  voiceModeRef.current = voiceModeEnabled;
+  const conversationActive =
+    voiceModeEnabled && !userStoppedVoiceMode && !disabled;
+  const isProcessing = isThinking || isSpeaking || isMemoryBusy;
+
+  conversationActiveRef.current = conversationActive;
   thinkingRef.current = isThinking;
   speakingRef.current = isSpeaking;
+  memoryBusyRef.current = isMemoryBusy;
   disabledRef.current = disabled;
 
   const supported = isSpeechRecognitionSupported();
   const voiceUnsupportedMessage = getVoiceUnsupportedMessage();
-  const isProcessing = isThinking || isSpeaking;
 
-  const logVoiceState = useCallback(
-    (label: string, extra?: Record<string, unknown>) => {
+  const logDebugState = useCallback(
+    (label: string) => {
       console.log("VOICE state", {
         label,
-        isListening,
-        isSpeaking,
-        isThinking,
-        isProcessing,
-        voiceModeEnabled,
+        conversationActive: conversationActiveRef.current,
+        recognitionRunning,
+        isSpeaking: speakingRef.current,
+        isProcessing:
+          thinkingRef.current ||
+          speakingRef.current ||
+          memoryBusyRef.current,
+        lastVoiceError,
         needsManualContinue,
-        statusError,
-        silenceFired: silenceFiredRef.current,
-        ...extra,
       });
     },
-    [isListening, isSpeaking, isThinking, isProcessing, voiceModeEnabled, needsManualContinue, statusError]
+    [recognitionRunning, lastVoiceError, needsManualContinue]
   );
 
   const clearTranscriptRefs = useCallback(() => {
@@ -177,15 +181,44 @@ export default function VoiceInput({
     }
   }, []);
 
-  const canListenNow = useCallback(() => {
+  const setRecognitionRunningState = useCallback((running: boolean) => {
+    setRecognitionRunning(running);
+  }, []);
+
+  const canStartRecognition = useCallback(() => {
     return (
-      voiceModeRef.current &&
-      !disabledRef.current &&
+      conversationActiveRef.current &&
       !thinkingRef.current &&
       !speakingRef.current &&
+      !memoryBusyRef.current &&
+      !disabledRef.current &&
       supported
     );
   }, [supported]);
+
+  const abortRecognition = useCallback(() => {
+    const recognition = recognitionRef.current;
+    recognitionRef.current = null;
+    isStartingRef.current = false;
+    setRecognitionRunningState(false);
+
+    if (!recognition) return;
+
+    recognition.onresult = null;
+    recognition.onerror = null;
+    recognition.onend = null;
+    recognition.onstart = null;
+
+    try {
+      recognition.abort();
+    } catch {
+      try {
+        recognition.stop();
+      } catch {
+        /* ignore */
+      }
+    }
+  }, [setRecognitionRunningState]);
 
   const updateLatestTranscript = useCallback(
     (text: string) => {
@@ -211,7 +244,6 @@ export default function VoiceInput({
         text === lastSentTranscriptRef.current &&
         now - lastSentAtRef.current < VOICE_SEND_DEDUP_MS
       ) {
-        logVoiceState("sendFinalTranscript deduped", { text });
         return false;
       }
 
@@ -219,59 +251,10 @@ export default function VoiceInput({
       lastSentAtRef.current = now;
       silenceFiredRef.current = false;
       onInterimTranscript?.("");
-      logVoiceState("sendFinalTranscript", { text });
       onTranscript(text);
       return true;
     },
-    [onTranscript, onInterimTranscript, logVoiceState]
-  );
-
-  const stopRecognitionEngine = useCallback(() => {
-    const recognition = recognitionRef.current;
-    recognitionRef.current = null;
-    setIsListening(false);
-    isStartingRef.current = false;
-
-    if (!recognition) return;
-
-    try {
-      recognition.stop();
-    } catch {
-      try {
-        recognition.abort();
-      } catch {
-        /* ignore */
-      }
-    }
-  }, []);
-
-  const stopListening = useCallback(
-    (options?: { discardTranscript?: boolean }) => {
-      clearSilenceTimer();
-      clearRestartTimer();
-      isStartingRef.current = false;
-
-      if (options?.discardTranscript) {
-        clearTranscriptRefs();
-      }
-
-      const recognition = recognitionRef.current;
-      recognitionRef.current = null;
-      setIsListening(false);
-
-      if (recognition) {
-        try {
-          recognition.abort();
-        } catch {
-          try {
-            recognition.stop();
-          } catch {
-            /* ignore */
-          }
-        }
-      }
-    },
-    [clearSilenceTimer, clearRestartTimer, clearTranscriptRefs]
+    [onTranscript, onInterimTranscript]
   );
 
   const handleSilenceTimeout = useCallback(() => {
@@ -280,21 +263,15 @@ export default function VoiceInput({
     setNearSend(false);
 
     const text = latestTranscriptRef.current.trim();
-    logVoiceState("silence timeout", { text });
-
     if (text) {
-      if (recognitionRef.current) {
-        stopRecognitionEngine();
-      }
+      abortRecognition();
       clearTranscriptRefs();
       sendFinalTranscript(text);
       return;
     }
 
-    if (recognitionRef.current) {
-      stopRecognitionEngine();
-    }
-  }, [clearTranscriptRefs, stopRecognitionEngine, sendFinalTranscript, logVoiceState]);
+    abortRecognition();
+  }, [abortRecognition, clearTranscriptRefs, sendFinalTranscript]);
 
   const resetSilenceTimer = useCallback(
     (transcript: string) => {
@@ -304,7 +281,7 @@ export default function VoiceInput({
       const delay = getSilenceDelay(transcript);
       silenceDueAtRef.current = Date.now() + delay;
 
-      const nearLead = Math.max(0, delay - NEAR_SEND_LEAD_MS);
+      const nearLead = Math.max(0, delay - 1200);
       if (nearLead > 0 && transcript.trim()) {
         nearSendTimerRef.current = setTimeout(() => {
           nearSendTimerRef.current = null;
@@ -319,40 +296,52 @@ export default function VoiceInput({
     [clearSilenceTimer, handleSilenceTimeout]
   );
 
-  const startListeningRef = useRef<(preserveTranscript?: boolean) => void>(() => {});
+  const startRecognitionRef = useRef<() => boolean>(() => false);
 
-  startListeningRef.current = (preserveTranscript = false) => {
-    if (!canListenNow()) {
-      logVoiceState("startListening blocked", {
+  startRecognitionRef.current = () => {
+    if (!canStartRecognition()) {
+      console.log("VOICE restart blocked", {
+        conversationActive: conversationActiveRef.current,
         thinking: thinkingRef.current,
         speaking: speakingRef.current,
+        memoryBusy: memoryBusyRef.current,
       });
       return false;
     }
 
-    if (recognitionRef.current || isStartingRef.current) {
-      return true;
+    if (isStartingRef.current) {
+      return recognitionRunning;
     }
 
+    abortRecognition();
     isStartingRef.current = true;
-    setStatusError(null);
     setNeedsManualContinue(false);
+    setLastVoiceError(null);
 
-    if (!preserveTranscript) {
-      clearTranscriptRefs();
-    }
-
-    const recognition = getSpeechRecognition();
-    if (!recognition) {
+    const Ctor = getSpeechRecognitionCtor();
+    if (!Ctor) {
       isStartingRef.current = false;
       setNeedsManualContinue(true);
       return false;
     }
 
+    console.log("VOICE start requested");
+    clearTranscriptRefs();
+
+    const recognition = new Ctor();
     recognition.lang = "cs-CZ";
     recognition.interimResults = true;
-    recognition.continuous = true;
+    recognition.continuous = !isIOSSafari();
     recognition.maxAlternatives = 1;
+
+    recognition.onstart = () => {
+      console.log("VOICE started");
+      isStartingRef.current = false;
+      setRecognitionRunningState(true);
+      setNeedsManualContinue(false);
+      setLastVoiceError(null);
+      logDebugState("onstart");
+    };
 
     recognition.onresult = (event: SpeechRecognitionEvent) => {
       let interimTranscript = "";
@@ -384,191 +373,183 @@ export default function VoiceInput({
     };
 
     recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
-      console.log("recognition error", event.error);
+      console.log("VOICE error", event.error);
+      setLastVoiceError(event.error);
       clearSilenceTimer();
       isStartingRef.current = false;
-      setIsListening(false);
       recognitionRef.current = null;
-
-      if (event.error === "no-speech" || event.error === "aborted") {
-        if (canListenNow()) {
-          scheduleListeningRestartRef.current(RESTART_AFTER_EMPTY_SILENCE_MS);
-        }
-        return;
-      }
+      setRecognitionRunningState(false);
 
       if (event.error === "not-allowed" || event.error === "service-not-allowed") {
         setStatusError(PERMISSION_DENIED_MSG);
+        setUserStoppedVoiceMode(true);
         onVoiceModeChange(false);
         return;
       }
 
-      if (canListenNow()) {
+      if (!conversationActiveRef.current) return;
+
+      const harmless =
+        event.error === "no-speech" ||
+        event.error === "aborted" ||
+        event.error === "audio-capture";
+
+      if (harmless && canStartRecognition()) {
+        restartListeningRef.current(RESTART_AFTER_ERROR_MS);
+        return;
+      }
+
+      if (canStartRecognition()) {
         setNeedsManualContinue(true);
-        logVoiceState("recognition error needs manual continue", {
-          error: event.error,
-        });
+        logDebugState("error needs manual continue");
       }
     };
 
     recognition.onend = () => {
-      console.log("recognition onend");
-      handleRecognitionEndRef.current();
+      console.log("VOICE onend");
+      setRecognitionRunningState(false);
+      recognitionRef.current = null;
+      isStartingRef.current = false;
+
+      if (!conversationActiveRef.current) return;
+
+      if (silenceFiredRef.current) {
+        silenceFiredRef.current = false;
+        if (canStartRecognition()) {
+          restartListeningRef.current(RESTART_DELAY_MS);
+        }
+        return;
+      }
+
+      const text = latestTranscriptRef.current.trim();
+      const waitingForSilence =
+        hasTranscriptRef.current && Date.now() < silenceDueAtRef.current;
+
+      if (waitingForSilence && text) {
+        restartListeningRef.current(0);
+        return;
+      }
+
+      if (hasTranscriptRef.current && text) {
+        clearTranscriptRefs();
+        sendFinalTranscript(text);
+        return;
+      }
+
+      clearTranscriptRefs();
+
+      if (canStartRecognition()) {
+        restartListeningRef.current(RESTART_DELAY_MS);
+      }
     };
 
     recognitionRef.current = recognition;
+
     try {
       recognition.start();
-      setIsListening(true);
+      console.log("VOICE start() called");
       isStartingRef.current = false;
-      logVoiceState("recognition started");
-
-      const existing = latestTranscriptRef.current.trim();
-      const silenceStillPending =
-        preserveTranscript &&
-        silenceTimerRef.current !== null &&
-        Date.now() < silenceDueAtRef.current;
-
-      if (existing && !silenceStillPending) {
-        resetSilenceTimer(existing);
-      } else if (!existing && !silenceStillPending) {
-        resetSilenceTimer("");
-      }
+      setRecognitionRunningState(true);
+      resetSilenceTimer("");
       return true;
     } catch (err) {
-      console.log("recognition start failed", err);
-      setIsListening(false);
+      const name = err instanceof Error ? err.name : String(err);
+      console.log("VOICE start failed", name, err);
+      setLastVoiceError(name);
       recognitionRef.current = null;
       isStartingRef.current = false;
+      setRecognitionRunningState(false);
       clearSilenceTimer();
-      setNeedsManualContinue(true);
-      logVoiceState("recognition start failed");
+
+      if (
+        name === "NotAllowedError" ||
+        name === "InvalidStateError" ||
+        /not-allowed|invalid state/i.test(name)
+      ) {
+        setNeedsManualContinue(true);
+      }
       return false;
     }
   };
 
-  const scheduleListeningRestartRef = useRef<(delayMs: number) => void>(() => {});
+  const restartListeningRef = useRef<(delayMs: number) => void>(() => {});
 
-  scheduleListeningRestartRef.current = (delayMs: number) => {
+  restartListeningRef.current = (delayMs: number) => {
     clearRestartTimer();
 
-    if (!canListenNow()) {
+    if (!conversationActiveRef.current) {
+      console.log("VOICE restart blocked", { reason: "conversation inactive" });
       return;
     }
 
+    if (!canStartRecognition()) {
+      console.log("VOICE restart blocked", {
+        reason: "still processing",
+        thinking: thinkingRef.current,
+        speaking: speakingRef.current,
+        memoryBusy: memoryBusyRef.current,
+      });
+      return;
+    }
+
+    console.log("VOICE restart scheduled", { delayMs });
     restartTimerRef.current = setTimeout(() => {
       restartTimerRef.current = null;
-      if (!canListenNow()) return;
 
-      silenceFiredRef.current = false;
-      const started = startListeningRef.current(false);
+      if (!canStartRecognition()) {
+        console.log("VOICE restart blocked", { reason: "timer fired but busy" });
+        return;
+      }
+
+      abortRecognition();
+      const started = startRecognitionRef.current();
       if (!started) {
         setNeedsManualContinue(true);
-        logVoiceState("auto restart failed, manual continue");
-      } else {
-        logVoiceState("auto restart success");
+        console.log("VOICE restart failed, manual continue required");
       }
     }, delayMs);
   };
 
-  const handleRecognitionEndRef = useRef<() => void>(() => {});
-
-  handleRecognitionEndRef.current = () => {
-    console.log("recognition onend handler");
-    setIsListening(false);
-    recognitionRef.current = null;
-    isStartingRef.current = false;
-
-    if (silenceFiredRef.current) {
-      silenceFiredRef.current = false;
-      logVoiceState("onend after silence send");
-      if (canListenNow()) {
-        scheduleListeningRestartRef.current(RESTART_AFTER_EMPTY_SILENCE_MS);
-      }
-      return;
-    }
-
-    const text = latestTranscriptRef.current.trim();
-    const waitingForSilence =
-      hasTranscriptRef.current && Date.now() < silenceDueAtRef.current;
-
-    if (waitingForSilence && text) {
-      logVoiceState("onend preserve transcript, restart recognition");
-      const started = startListeningRef.current(true);
-      if (!started) {
-        scheduleListeningRestartRef.current(0);
-      }
-      return;
-    }
-
-    if (hasTranscriptRef.current && text) {
-      clearTranscriptRefs();
-      sendFinalTranscript(text);
-      return;
-    }
-
-    clearTranscriptRefs();
-
-    if (canListenNow()) {
-      scheduleListeningRestartRef.current(RESTART_AFTER_EMPTY_SILENCE_MS);
-    }
-  };
-
   useEffect(() => {
-    if (!voiceModeEnabled || disabled || isProcessing) {
-      stopListening({ discardTranscript: false });
-      return;
-    }
-  }, [voiceModeEnabled, disabled, isProcessing, stopListening]);
+    const wasProcessing = prevProcessingRef.current;
+    const nowProcessing = isProcessing;
+    prevProcessingRef.current = nowProcessing;
 
-  useEffect(() => {
-    if (!voiceModeEnabled || disabled || !supported) return;
-
-    const wasSpeaking = prevSpeakingRef.current;
-    const wasThinking = prevThinkingRef.current;
-    prevSpeakingRef.current = isSpeaking;
-    prevThinkingRef.current = isThinking;
-
-    const finishedSpeaking = wasSpeaking && !isSpeaking;
-    const finishedThinking = wasThinking && !isThinking;
-
-    if (finishedSpeaking && !isThinking) {
-      console.log("speech synthesis ended, restarting recognition");
-      silenceFiredRef.current = false;
-      scheduleListeningRestartRef.current(RESTART_AFTER_RESPONSE_MS);
+    if (nowProcessing) {
+      clearRestartTimer();
+      abortRecognition();
       return;
     }
 
-    if (finishedThinking && !isSpeaking && !readAloudEnabled) {
-      scheduleListeningRestartRef.current(RESTART_AFTER_RESPONSE_MS);
+    if (wasProcessing && conversationActive) {
+      console.log("VOICE processing ended, scheduling restart");
+      restartListeningRef.current(RESTART_DELAY_MS);
     }
-  }, [
-    isSpeaking,
-    isThinking,
-    voiceModeEnabled,
-    disabled,
-    supported,
-    readAloudEnabled,
-    stopListening,
-  ]);
+  }, [isProcessing, conversationActive, abortRecognition, clearRestartTimer]);
 
   useEffect(() => {
     const justEnabled = voiceModeEnabled && !prevVoiceModeRef.current;
     prevVoiceModeRef.current = voiceModeEnabled;
 
-    if (justEnabled && !disabled && supported && !isProcessing) {
-      logVoiceState("voice mode enabled, initial listen");
-      scheduleListeningRestartRef.current(0);
+    if (justEnabled && conversationActive && !isProcessing) {
+      restartListeningRef.current(0);
     }
-  }, [voiceModeEnabled, disabled, supported, isProcessing, logVoiceState]);
+  }, [voiceModeEnabled, conversationActive, isProcessing]);
+
+  useEffect(() => {
+    if (!conversationActive) {
+      clearRestartTimer();
+      abortRecognition();
+    }
+  }, [conversationActive, abortRecognition, clearRestartTimer]);
 
   useEffect(() => {
     return () => {
       clearSilenceTimer();
       clearRestartTimer();
-      stopListening();
+      abortRecognition();
     };
-  }, [clearSilenceTimer, clearRestartTimer, stopListening]);
+  }, [clearSilenceTimer, clearRestartTimer, abortRecognition]);
 
   const handleStartConversation = () => {
     if (!supported) {
@@ -578,6 +559,7 @@ export default function VoiceInput({
     setStatusError(null);
     setUserStoppedVoiceMode(false);
     setNeedsManualContinue(false);
+    setLastVoiceError(null);
     clearTranscriptRefs();
     onVoiceModeChange(true);
   };
@@ -586,24 +568,25 @@ export default function VoiceInput({
     clearSilenceTimer();
     clearRestartTimer();
     clearTranscriptRefs();
-    isStartingRef.current = false;
     onInterimTranscript?.("");
-    stopListening({ discardTranscript: true });
+    abortRecognition();
     setNeedsManualContinue(false);
     setUserStoppedVoiceMode(true);
     onVoiceModeChange(false);
     setStatusError(null);
-    logVoiceState("user ended conversation");
+    console.log("VOICE conversation ended by user");
   };
 
   const handleManualContinue = () => {
     setNeedsManualContinue(false);
     setStatusError(null);
+    setLastVoiceError(null);
     silenceFiredRef.current = false;
-    logVoiceState("manual continue");
-    const started = startListeningRef.current(false);
+    console.log("VOICE manual continue");
+    abortRecognition();
+    const started = startRecognitionRef.current();
     if (!started) {
-      scheduleListeningRestartRef.current(0);
+      restartListeningRef.current(0);
     }
   };
 
@@ -614,18 +597,30 @@ export default function VoiceInput({
     if (userStoppedVoiceMode && !voiceModeEnabled) {
       return "Rozhovor je ukončen.";
     }
-    if (!voiceModeEnabled) return null;
+    if (!conversationActive) return null;
     if (isSpeaking) return "Mello mluví…";
     if (isThinking) return "Mello přemýšlí…";
-    if (needsManualContinue) return "Klepněte na tlačítko a pokračujte v mluvení.";
-    if (isListening && hasDetectedText) {
+    if (isMemoryBusy) return "Ukládám vzpomínku…";
+    if (needsManualContinue) {
+      return "Klepněte na tlačítko a obnovte poslech.";
+    }
+    if (recognitionRunning && hasDetectedText) {
       if (nearSend) return "Rozumím, ještě chvíli počkám…";
       if (wordCount <= 3) return "Poslouchám, můžete pokračovat…";
       return "Mello poslouchá…";
     }
-    if (isListening) return "Mello poslouchá…";
-    return "Čekám, až promluvíte…";
+    if (recognitionRunning) return "Mello poslouchá…";
+    if (conversationActive && !isProcessing) {
+      return "Obnovuji poslech…";
+    }
+    return null;
   })();
+
+  const debugLine = `conv=${conversationActive ? "1" : "0"} rec=${
+    recognitionRunning ? "1" : "0"
+  } speak=${isSpeaking ? "1" : "0"} proc=${isProcessing ? "1" : "0"} err=${
+    lastVoiceError ?? "—"
+  }`;
 
   if (!supported && !voiceModeEnabled) {
     return (
@@ -663,13 +658,13 @@ export default function VoiceInput({
         </button>
       )}
 
-      {needsManualContinue && voiceModeEnabled && (
+      {needsManualContinue && conversationActive && (
         <button
           type="button"
           onClick={handleManualContinue}
           className="w-full max-w-md min-h-[72px] px-8 py-5 rounded-2xl text-xl font-bold text-white bg-emerald-600 hover:bg-emerald-700 shadow-lg transition border-2 border-emerald-800"
         >
-          Pokračovat v mluvení
+          Pokračovat v poslechu
         </button>
       )}
 
@@ -682,6 +677,12 @@ export default function VoiceInput({
           aria-live="polite"
         >
           {statusLabel}
+        </p>
+      )}
+
+      {conversationActive && (
+        <p className="text-center text-xs text-gray-500 font-mono max-w-md break-all">
+          {debugLine}
         </p>
       )}
 
