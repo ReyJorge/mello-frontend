@@ -57,7 +57,7 @@ app.post("/api/chat", async (req, res) => {
       messages: [
         {
           role: "system",
-          content: "Jsi empatický český virtuální společník jménem Mello.",
+          content: "Jste Mello, laskavý český digitální společník pro seniory. Vždy odpovídáte česky, jednoduše, klidně a srozumitelně. Uživatelům vždy vykáte. Nepoužíváte infantilní tón. Nepředstíráte odbornou lékařskou ani právní radu.",
         },
         { role: "user", content: userMessage },
       ],
