@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from "react";
 import avatarMello from "../assets/avatar-mello.png";
 import avatarUser from "../assets/avatar-user.png";
 import { supabase } from "../utils/supabaseClient";
-import { apiUrl } from "../utils/api";
+import { postChat } from "../utils/api";
 import {
   loadChatMessages,
   persistMessage,
@@ -21,8 +21,6 @@ import { detectMemoryCandidate } from "../utils/memoryDetection";
 
 const OFFLINE_MSG =
   "Jste offline. Zkontrolujte připojení k internetu a zkuste to znovu.";
-const API_ERROR_MSG =
-  "Omlouvám se, teď vám nemohu odpovědět. Zkuste to prosím za chvíli znovu.";
 const TTS_BLOCKED_MSG =
   "Hlas nelze spustit automaticky. Klepněte na tlačítko „Přečíst nahlas“ u poslední odpovědi.";
 
@@ -154,76 +152,19 @@ export default function ChatWindow() {
     setInput("");
     setLoading(true);
 
-    const chatUrl = apiUrl("/api/chat");
-    let chatErrorDetail = null;
-
     try {
-      const response = await fetch(chatUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: text }),
-      });
-
-      let data = null;
-      try {
-        data = await response.json();
-      } catch (parseErr) {
-        console.error("[Mello chat] Nepodařilo se přečíst JSON odpověď:", {
-          url: chatUrl,
-          status: response.status,
-          parseErr,
-        });
-      }
-
-      if (!response.ok) {
-        chatErrorDetail = `Chyba chatu: ${response.status} – ${
-          data?.detail ?? data?.error ?? response.statusText ?? "neznámá chyba"
-        }`;
-        console.error("[Mello chat] API chyba:", {
-          url: chatUrl,
-          status: response.status,
-          statusText: response.statusText,
-          body: data,
-          detail: data?.detail,
-        });
-        throw new Error(`api-${response.status}`);
-      }
-
-      if (data?.error === "CHAT_FUNCTION_ERROR") {
-        chatErrorDetail = `Chyba chatu: ${data.detail ?? data.error}`;
-        console.error("[Mello chat] CHAT_FUNCTION_ERROR:", data.detail);
-        throw new Error("chat-function");
-      }
-
-      if (data?.reply) {
-        const melloMessage = createMessage("mello", data.reply);
-        appendMessage(melloMessage);
-        playReply(data.reply);
-        evaluateMemoryCandidate(text);
-      } else {
-        console.error("[Mello chat] Odpověď bez pole reply:", {
-          url: chatUrl,
-          data,
-        });
-        throw new Error("empty");
-      }
+      const { reply } = await postChat(text);
+      const melloMessage = createMessage("mello", reply);
+      appendMessage(melloMessage);
+      playReply(reply);
+      evaluateMemoryCandidate(text);
     } catch (err) {
-      console.error("[Mello chat] Odeslání zprávy selhalo:", {
-        url: chatUrl,
-        message: err?.message ?? err,
-        chatErrorDetail,
-      });
       const debugText =
-        chatErrorDetail ??
-        (err?.message?.startsWith("api-")
-          ? `Chyba chatu: ${err.message.replace("api-", "")}`
-          : null);
-      if (debugText) {
-        setBannerError(debugText);
-      } else {
-        setBannerError(null);
-        appendMessage(createMessage("mello", API_ERROR_MSG));
-      }
+        err?.message?.startsWith("Chyba chatu:")
+          ? err.message
+          : `Chyba chatu: ${err?.message ?? "neznámá chyba"}`;
+      console.error("[Mello chat] Odeslání zprávy selhalo:", err);
+      setBannerError(debugText);
     } finally {
       setLoading(false);
     }
