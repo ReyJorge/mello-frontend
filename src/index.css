@@ -2,6 +2,110 @@
 @tailwind components;
 @tailwind utilities;
 
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes melloOrbPulse {
+  0% {
+    transform: scale(1);
+    opacity: 0.55;
+  }
+  100% {
+    transform: scale(1.55);
+    opacity: 0;
+  }
+}
+
+/* === Mello chat: premium companion UI === */
+.mello-chat-layout {
+  padding: 0.5rem 0.75rem 1rem;
+  max-width: 100%;
+}
+
+.mello-chat-shell {
+  background: linear-gradient(
+    165deg,
+    #0f4c5c 0%,
+    #1a6b5c 28%,
+    #2d8a6e 55%,
+    #1e5f7a 85%,
+    #163a52 100%
+  );
+  border-radius: 1.75rem;
+  box-shadow:
+    0 25px 50px -12px rgba(15, 76, 92, 0.45),
+    inset 0 1px 0 rgba(255, 255, 255, 0.12);
+  padding: 1rem 0.75rem 0.5rem;
+}
+
+.mello-chat-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.25) transparent;
+}
+
+.mello-bubble-user {
+  background: linear-gradient(135deg, #e0f2fe 0%, #bae6fd 100%);
+  color: #0c4a6e;
+}
+
+.mello-bubble-mello {
+  background: rgba(255, 255, 255, 0.92);
+  color: #134e4a;
+}
+
+.mello-btn-primary {
+  background: linear-gradient(135deg, #10b981 0%, #059669 100%) !important;
+  color: white !important;
+  border: none !important;
+  box-shadow: 0 4px 14px rgba(16, 185, 129, 0.35);
+}
+
+.mello-btn-primary:hover {
+  background: linear-gradient(135deg, #34d399 0%, #10b981 100%) !important;
+  transform: translateY(-1px);
+}
+
+.mello-btn-secondary {
+  background: rgba(255, 255, 255, 0.15) !important;
+  color: white !important;
+  border: 1px solid rgba(255, 255, 255, 0.35) !important;
+  backdrop-filter: blur(8px);
+}
+
+.mello-btn-secondary:hover {
+  background: rgba(255, 255, 255, 0.22) !important;
+}
+
+.mello-btn-ghost {
+  background: rgba(255, 255, 255, 0.12) !important;
+  color: white !important;
+  border: 1px solid rgba(255, 255, 255, 0.2) !important;
+}
+
+.mello-chip {
+  background: transparent !important;
+}
+
+.mello-orb-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  border: 2px solid rgba(52, 211, 153, 0.45);
+  animation: melloOrbPulse 2s ease-out infinite;
+}
+
+.mello-orb-ring-2 {
+  animation-delay: 0.7s;
+}
+
 /* === Mello: Vzhled optimalizovaný pro seniory === */
 
 body {

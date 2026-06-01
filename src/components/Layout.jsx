@@ -6,7 +6,7 @@ import { supabase } from "../utils/supabaseClient";
 const navLinkClass =
   "inline-flex items-center justify-center min-h-[44px] px-4 py-2 text-lg font-medium text-blue-800 rounded-lg hover:bg-blue-50";
 
-export default function Layout({ children }) {
+export default function Layout({ children, mainClassName = "" }) {
   const { user } = useUser();
   const navigate = useNavigate();
   const [menuOpen, setMenuOpen] = useState(false);
@@ -79,7 +79,9 @@ export default function Layout({ children }) {
         </div>
       </nav>
 
-      <main className="p-4 pb-8 flex-1">{children}</main>
+      <main className={`p-4 pb-8 flex-1 ${mainClassName}`.trim()}>
+        {children}
+      </main>
 
       <footer className="border-t bg-white px-4 py-4 text-center text-base text-gray-600">
         <Link to="/privacy" className="text-blue-700 underline min-h-[44px] inline-flex items-center">
