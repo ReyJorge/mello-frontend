@@ -154,28 +154,53 @@ export default function ChatWindow() {
     setInput("");
     setLoading(true);
 
+    const chatUrl = apiUrl("/api/chat");
+
     try {
-      const response = await fetch(apiUrl("/api/chat"), {
+      const response = await fetch(chatUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message: text }),
       });
 
-      if (!response.ok) {
-        throw new Error("api");
+      let data = null;
+      try {
+        data = await response.json();
+      } catch (parseErr) {
+        console.error("[Mello chat] Nepodařilo se přečíst JSON odpověď:", {
+          url: chatUrl,
+          status: response.status,
+          parseErr,
+        });
       }
 
-      const data = await response.json();
+      if (!response.ok) {
+        console.error("[Mello chat] API chyba:", {
+          url: chatUrl,
+          status: response.status,
+          statusText: response.statusText,
+          body: data,
+        });
+        throw new Error(`api-${response.status}`);
+      }
 
-      if (data.reply) {
+      if (data?.reply) {
         const melloMessage = createMessage("mello", data.reply);
         appendMessage(melloMessage);
         playReply(data.reply);
         evaluateMemoryCandidate(text);
       } else {
+        console.error("[Mello chat] Odpověď bez pole reply:", {
+          url: chatUrl,
+          data,
+        });
         throw new Error("empty");
       }
-    } catch {
+    } catch (err) {
+      console.error("[Mello chat] Odeslání zprávy selhalo:", {
+        url: chatUrl,
+        message: err?.message ?? err,
+      });
       setBannerError(null);
       const errMsg = createMessage("mello", API_ERROR_MSG);
       appendMessage(errMsg);

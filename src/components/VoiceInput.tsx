@@ -2,6 +2,8 @@ import { useState, useRef, useCallback, useEffect } from "react";
 
 const UNSUPPORTED_MSG =
   "Hlasové ovládání v tomto prohlížeči nemusí fungovat. Zkuste prosím Chrome nebo napište zprávu ručně.";
+const IOS_SAFARI_VOICE_MSG =
+  "Na iPhonu a iPadu (Safari) hlasové ovládání bohužel nefunguje. Napište zprávu ručně do pole níže — Mello vám ráda odpoví.";
 const PERMISSION_DENIED_MSG =
   "Mikrofon není povolený. Povolte prosím mikrofon v nastavení prohlížeči, nebo napište zprávu ručně.";
 
@@ -21,6 +23,21 @@ function getSpeechRecognition(): SpeechRecognition | null {
 
 export function isSpeechRecognitionSupported(): boolean {
   return getSpeechRecognition() !== null;
+}
+
+function isIOSSafari(): boolean {
+  if (typeof navigator === "undefined") return false;
+  const ua = navigator.userAgent;
+  const isIOS =
+    /iPad|iPhone|iPod/i.test(ua) ||
+    (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  const isSafari = /Safari/i.test(ua) && !/Chrome|CriOS|FxiOS|EdgiOS/i.test(ua);
+  return isIOS && isSafari;
+}
+
+export function getVoiceUnsupportedMessage(): string {
+  if (isIOSSafari()) return IOS_SAFARI_VOICE_MSG;
+  return UNSUPPORTED_MSG;
 }
 
 function countWords(text: string): number {
@@ -110,6 +127,7 @@ export default function VoiceInput({
   disabledRef.current = disabled;
 
   const supported = isSpeechRecognitionSupported();
+  const voiceUnsupportedMessage = getVoiceUnsupportedMessage();
 
   const clearTranscriptRefs = useCallback(() => {
     latestTranscriptRef.current = "";
@@ -528,7 +546,7 @@ export default function VoiceInput({
 
   const handleStartConversation = () => {
     if (!supported) {
-      setStatusError(UNSUPPORTED_MSG);
+      setStatusError(voiceUnsupportedMessage);
       return;
     }
     setStatusError(null);
@@ -579,7 +597,7 @@ export default function VoiceInput({
           className="text-center text-lg font-medium text-amber-900 max-w-md bg-amber-50 border-2 border-amber-200 rounded-2xl p-4"
           role="status"
         >
-          {UNSUPPORTED_MSG}
+          {voiceUnsupportedMessage}
         </p>
       </div>
     );

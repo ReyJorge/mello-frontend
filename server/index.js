@@ -1,4 +1,5 @@
-// server/index.js
+// server/index.js – lokální vývoj (Vite proxy /api → tento server)
+// Produkce na Netlify: netlify/functions/chat.mjs (OPENAI_API_KEY v Netlify env)
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";

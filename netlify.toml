@@ -1,0 +1,17 @@
+[build]
+  command = "npm run build"
+  publish = "dist"
+  functions = "netlify/functions"
+
+# Chat API – same-origin /api/chat (Express neběží na Netlify)
+[[redirects]]
+  from = "/api/chat"
+  to = "/.netlify/functions/chat"
+  status = 200
+  force = true
+
+# SPA – musí být poslední
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
