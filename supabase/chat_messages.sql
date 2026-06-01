@@ -1,0 +1,2 @@
+-- DEPRECATED: použijte supabase/full_setup.sql
+-- Tento soubor už nespouštějte samostatně.
