@@ -23,11 +23,22 @@ export async function handler(event) {
     return { statusCode: 204, headers: JSON_HEADERS, body: "" };
   }
 
+  if (event.httpMethod === "GET") {
+    const configured = Boolean(process.env.OPENAI_API_KEY?.trim());
+    return respond(200, {
+      ok: true,
+      openaiConfigured: configured,
+      hint: configured
+        ? "Chat API is ready"
+        : "Set OPENAI_API_KEY in Netlify → Site configuration → Environment variables → Production",
+    });
+  }
+
   if (event.httpMethod !== "POST") {
     return respond(405, { error: "Method not allowed" });
   }
 
-  const apiKey = process.env.OPENAI_API_KEY;
+  const apiKey = process.env.OPENAI_API_KEY?.trim();
   if (!apiKey) {
     const err = new Error("OPENAI_API_KEY is not set on Netlify");
     console.error("CHAT_FUNCTION_ERROR", err);
@@ -88,9 +99,15 @@ export async function handler(event) {
     return respond(200, { reply });
   } catch (error) {
     console.error("CHAT_FUNCTION_ERROR", error);
-    return respond(500, {
+    const status = error?.status === 429 ? 503 : 500;
+    let detail = error?.message ?? String(error);
+    if (error?.code === "insufficient_quota" || error?.status === 429) {
+      detail =
+        "OpenAI kvóta vyčerpána. Zkontrolujte billing na platform.openai.com.";
+    }
+    return respond(status, {
       error: "CHAT_FUNCTION_ERROR",
-      detail: error?.message ?? String(error),
+      detail,
     });
   }
 }

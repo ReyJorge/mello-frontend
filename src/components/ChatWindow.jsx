@@ -155,6 +155,7 @@ export default function ChatWindow() {
     setLoading(true);
 
     const chatUrl = apiUrl("/api/chat");
+    let chatErrorDetail = null;
 
     try {
       const response = await fetch(chatUrl, {
@@ -175,6 +176,9 @@ export default function ChatWindow() {
       }
 
       if (!response.ok) {
+        chatErrorDetail = `Chyba chatu: ${response.status} – ${
+          data?.detail ?? data?.error ?? response.statusText ?? "neznámá chyba"
+        }`;
         console.error("[Mello chat] API chyba:", {
           url: chatUrl,
           status: response.status,
@@ -186,6 +190,7 @@ export default function ChatWindow() {
       }
 
       if (data?.error === "CHAT_FUNCTION_ERROR") {
+        chatErrorDetail = `Chyba chatu: ${data.detail ?? data.error}`;
         console.error("[Mello chat] CHAT_FUNCTION_ERROR:", data.detail);
         throw new Error("chat-function");
       }
@@ -206,10 +211,19 @@ export default function ChatWindow() {
       console.error("[Mello chat] Odeslání zprávy selhalo:", {
         url: chatUrl,
         message: err?.message ?? err,
+        chatErrorDetail,
       });
-      setBannerError(null);
-      const errMsg = createMessage("mello", API_ERROR_MSG);
-      appendMessage(errMsg);
+      const debugText =
+        chatErrorDetail ??
+        (err?.message?.startsWith("api-")
+          ? `Chyba chatu: ${err.message.replace("api-", "")}`
+          : null);
+      if (debugText) {
+        setBannerError(debugText);
+      } else {
+        setBannerError(null);
+        appendMessage(createMessage("mello", API_ERROR_MSG));
+      }
     } finally {
       setLoading(false);
     }
