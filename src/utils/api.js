@@ -10,6 +10,11 @@
 export function getApiBase() {
   const env = import.meta.env.VITE_API_URL;
   if (env && String(env).trim()) {
+    if (import.meta.env.PROD) {
+      console.warn(
+        "[Mello] VITE_API_URL je nastavené v produkčním buildu – chat může selhat. Na Netlify ho odstraňte."
+      );
+    }
     return String(env).trim().replace(/\/$/, "");
   }
   return "";

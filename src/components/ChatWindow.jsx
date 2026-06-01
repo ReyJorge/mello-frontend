@@ -180,8 +180,14 @@ export default function ChatWindow() {
           status: response.status,
           statusText: response.statusText,
           body: data,
+          detail: data?.detail,
         });
         throw new Error(`api-${response.status}`);
+      }
+
+      if (data?.error === "CHAT_FUNCTION_ERROR") {
+        console.error("[Mello chat] CHAT_FUNCTION_ERROR:", data.detail);
+        throw new Error("chat-function");
       }
 
       if (data?.reply) {

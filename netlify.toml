@@ -3,14 +3,28 @@
   publish = "dist"
   functions = "netlify/functions"
 
-# Chat API – same-origin /api/chat (Express neběží na Netlify)
+# Produkční build nesmí mířit na localhost (přebije Netlify UI env, pokud je nastavené)
+[build.environment]
+  VITE_API_URL = ""
+
+[functions]
+  node_bundler = "esbuild"
+  directory = "netlify/functions"
+
+# Chat API – MUSÍ být před SPA fallback /*
 [[redirects]]
   from = "/api/chat"
   to = "/.netlify/functions/chat"
   status = 200
   force = true
 
-# SPA – musí být poslední
+[[redirects]]
+  from = "/api/chat/"
+  to = "/.netlify/functions/chat"
+  status = 200
+  force = true
+
+# SPA – poslední pravidlo
 [[redirects]]
   from = "/*"
   to = "/index.html"
